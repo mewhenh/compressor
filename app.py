@@ -25,6 +25,14 @@ except ImportError:
     DND_AVAILABLE = False
 
 
+import subprocess
+import platform
+
+def _popen_kwargs():
+    if platform.system().lower().startswith("win"):
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
 # ──────────────────────────────────────────────
 #  Local ffmpeg/ffprobe paths
 # ──────────────────────────────────────────────
@@ -73,7 +81,7 @@ class EncodeConfig:
 def run_cmd(cmd: list, log_fn=None) -> None:
     if log_fn:
         log_fn("$ " + " ".join(cmd))
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_popen_kwargs())
 
 
 def run_cmd_progress(cmd: list, duration_s: float, progress_cb,
@@ -84,7 +92,7 @@ def run_cmd_progress(cmd: list, duration_s: float, progress_cb,
     cmd = [tmp_path if a == "__PROGRESS__" else a for a in cmd]
     if log_fn:
         log_fn("$ " + " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_popen_kwargs())
     pct_range = pct_end - pct_start
     last_pct = pct_start
     while proc.poll() is None:
@@ -121,7 +129,7 @@ def ffprobe_info(input_path: str) -> dict:
         "-of", "json", input_path
     ]
     try:
-        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, **_popen_kwargs())
         data = json.loads(out)
         duration = float(data.get("format", {}).get("duration", 0) or 0)
         width, height = 0, 0
@@ -212,7 +220,7 @@ def extract_thumbnail(video_path: str, size=(128, 72)):
                     f"pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2:black"),
             tmp.name
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_popen_kwargs())
         img = Image.open(tmp.name).convert("RGBA")
         mask = Image.new("L", img.size, 0)
         draw = ImageDraw.Draw(mask)

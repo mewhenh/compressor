@@ -26,7 +26,35 @@ except ImportError:
 
 
 # ──────────────────────────────────────────────
-#  Core encode logic (unchanged)
+#  Local ffmpeg/ffprobe paths
+# ──────────────────────────────────────────────
+
+def _app_dir() -> Path:
+    # If you later bundle with PyInstaller, this still works in one-file mode
+    # because sys._MEIPASS exists; but we keep it simple and robust.
+    try:
+        import sys
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            return Path(sys._MEIPASS)
+    except Exception:
+        pass
+    return Path(__file__).resolve().parent
+
+def _local_bin(name: str) -> str:
+    # expects: <script_dir>/ffmpeg/ffmpeg.exe and ffprobe.exe on Windows
+    base = _app_dir() / "ffmpeg"
+    if platform.system().lower().startswith("win"):
+        p = base / f"{name}.exe"
+    else:
+        # if you ever ship mac/linux binaries similarly, you can drop them here
+        p = base / name
+    return str(p)
+
+FFMPEG_EXE  = _local_bin("ffmpeg")
+FFPROBE_EXE = _local_bin("ffprobe")
+
+# ──────────────────────────────────────────────
+#  Core encode logic
 # ──────────────────────────────────────────────
 
 @dataclass
@@ -88,7 +116,7 @@ def run_cmd_progress(cmd: list, duration_s: float, progress_cb,
 
 def ffprobe_info(input_path: str) -> dict:
     cmd = [
-        "ffprobe", "-v", "error",
+        FFPROBE_EXE, "-v", "error",
         "-show_entries", "format=duration:stream=width,height",
         "-of", "json", input_path
     ]
@@ -140,14 +168,14 @@ def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig,
         vf_args = ["-vf", f"scale=-2:{h}"]
     cb = progress_cb or (lambda v: None)
     pass1 = [
-        "ffmpeg", "-y", "-i", input_path, *trim_args,
+        FFMPEG_EXE, "-y", "-i", input_path, *trim_args,
         "-c:v", cfg.codec, "-b:v", f"{v_kbps}k",
         "-preset", cfg.preset, "-pass", "1", "-passlogfile", logbase,
         *vf_args, "-an", "-progress", "__PROGRESS__",
         "-f", "mp4", null_device()
     ]
     pass2 = [
-        "ffmpeg", "-y", "-i", input_path, *trim_args,
+        FFMPEG_EXE, "-y", "-i", input_path, *trim_args,
         "-c:v", cfg.codec, "-b:v", f"{v_kbps}k",
         "-preset", cfg.preset, "-pass", "2", "-passlogfile", logbase,
         *vf_args,
@@ -178,7 +206,7 @@ def extract_thumbnail(video_path: str, size=(128, 72)):
         tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         tmp.close()
         cmd = [
-            "ffmpeg", "-y", "-ss", "1", "-i", video_path,
+            FFMPEG_EXE, "-y", "-ss", "1", "-i", video_path,
             "-vframes", "1", "-q:v", "2",
             "-vf", (f"scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease,"
                     f"pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2:black"),
@@ -235,7 +263,6 @@ CPU_PRESETS   = ["ultrafast", "superfast", "veryfast", "faster", "fast",
 
 NVENC_PRESETS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"]
 
-# Optional: keep the "feel" when switching CPU <-> NVENC
 CPU_TO_NVENC = {
     "ultrafast": "p1",
     "superfast": "p2",
@@ -991,6 +1018,13 @@ class App(_TkBase):
 
 def main():
     root = App()
+
+    # Optional: warn if local ffmpeg tools are missing
+    if not Path(FFMPEG_EXE).exists():
+        root._log_q.put(f"ERROR: Missing {FFMPEG_EXE}")
+    if not Path(FFPROBE_EXE).exists():
+        root._log_q.put(f"ERROR: Missing {FFPROBE_EXE}")
+
     if not DND_AVAILABLE:
         root._log_q.put("Tip: pip install tkinterdnd2  →  drag & drop support")
     if not PIL_AVAILABLE:

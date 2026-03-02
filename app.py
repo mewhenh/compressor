@@ -13,7 +13,7 @@ import time
 import tempfile
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageDraw
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
@@ -26,7 +26,7 @@ except ImportError:
 
 
 # ──────────────────────────────────────────────
-#  Core encode logic
+#  Core encode logic (unchanged)
 # ──────────────────────────────────────────────
 
 @dataclass
@@ -50,24 +50,15 @@ def run_cmd(cmd: list, log_fn=None) -> None:
 
 def run_cmd_progress(cmd: list, duration_s: float, progress_cb,
                      pct_start=0, pct_end=100, log_fn=None) -> None:
-    """Run ffmpeg, writing -progress to a temp file we poll every 100ms."""
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False)
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
     tmp_path = tmp.name
     tmp.close()
-
-    # Swap "pipe:1" placeholder for the real temp path
     cmd = [tmp_path if a == "__PROGRESS__" else a for a in cmd]
-
     if log_fn:
         log_fn("$ " + " ".join(cmd))
-
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     pct_range = pct_end - pct_start
     last_pct = pct_start
-
     while proc.poll() is None:
         try:
             with open(tmp_path, "r") as f:
@@ -86,14 +77,11 @@ def run_cmd_progress(cmd: list, duration_s: float, progress_cb,
         except Exception:
             pass
         time.sleep(0.1)
-
     progress_cb(pct_end)
-
     try:
         os.unlink(tmp_path)
     except OSError:
         pass
-
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
@@ -136,32 +124,26 @@ def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig,
                     log_fn=None, progress_cb=None):
     input_path = str(input_path)
     output_path = str(output_path)
-
     full_dur = ffprobe_info(input_path)["duration"]
     if start_s is None:
         start_s = 0.0
     if end_s is None or end_s > full_dur:
         end_s = full_dur
     seg_dur = max(end_s - start_s, 0.001)
-
     v_kbps = compute_video_bitrate_kbps(
         cfg.target_mb, seg_dur, cfg.audio_kbps, cfg.mute, cfg.safety_margin)
     logbase = str(Path(__file__).parent / (Path(output_path).stem + "_2pass"))
     trim_args = ["-ss", f"{start_s}", "-to", f"{end_s}"]
-
     vf_args = []
     if cfg.resolution != "original":
         h = cfg.resolution.replace("p", "")
         vf_args = ["-vf", f"scale=-2:{h}"]
-
     cb = progress_cb or (lambda v: None)
-
     pass1 = [
         "ffmpeg", "-y", "-i", input_path, *trim_args,
         "-c:v", cfg.codec, "-b:v", f"{v_kbps}k",
         "-preset", cfg.preset, "-pass", "1", "-passlogfile", logbase,
-        *vf_args, "-an",
-        "-progress", "__PROGRESS__",
+        *vf_args, "-an", "-progress", "__PROGRESS__",
         "-f", "mp4", null_device()
     ]
     pass2 = [
@@ -175,13 +157,10 @@ def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig,
     else:
         pass2 += ["-c:a", cfg.audio_codec, "-b:a", f"{cfg.audio_kbps}k"]
     pass2 += ["-movflags", "+faststart", "-progress", "__PROGRESS__", output_path]
-
     try:
         cb(0)
-        run_cmd_progress(pass1, seg_dur, cb,
-                         pct_start=0,  pct_end=50,  log_fn=log_fn)
-        run_cmd_progress(pass2, seg_dur, cb,
-                         pct_start=50, pct_end=100, log_fn=log_fn)
+        run_cmd_progress(pass1, seg_dur, cb, pct_start=0, pct_end=50, log_fn=log_fn)
+        run_cmd_progress(pass2, seg_dur, cb, pct_start=50, pct_end=100, log_fn=log_fn)
     finally:
         for suffix in ["-0.log", "-0.log.mbtree", ".log", ".log.mbtree"]:
             p = Path(logbase + suffix)
@@ -192,11 +171,10 @@ def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig,
                     pass
 
 
-def extract_thumbnail(video_path: str, size=(120, 68)):
+def extract_thumbnail(video_path: str, size=(128, 72)):
     if not PIL_AVAILABLE:
         return None
     try:
-        import tempfile
         tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         tmp.close()
         cmd = [
@@ -207,7 +185,11 @@ def extract_thumbnail(video_path: str, size=(120, 68)):
             tmp.name
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        img = Image.open(tmp.name)
+        img = Image.open(tmp.name).convert("RGBA")
+        mask = Image.new("L", img.size, 0)
+        draw = ImageDraw.Draw(mask)
+        draw.rounded_rectangle([0, 0, img.size[0] - 1, img.size[1] - 1], radius=6, fill=255)
+        img.putalpha(mask)
         photo = ImageTk.PhotoImage(img)
         os.unlink(tmp.name)
         return photo
@@ -216,20 +198,25 @@ def extract_thumbnail(video_path: str, size=(120, 68)):
 
 
 # ──────────────────────────────────────────────
-#  Theme constants
+#  Design tokens — GitHub-dark inspired palette
 # ──────────────────────────────────────────────
 
-BG       = "#111827"
-PANEL    = "#1f2937"
-CARD     = "#1a2332"
-BORDER   = "#2d3748"
-ACCENT   = "#6366f1"
-RED      = "#ef4444"
-GREEN    = "#22c55e"
-ORANGE   = "#f97316"
-TEXT     = "#f1f5f9"
-SUBTEXT  = "#94a3b8"
-INPUT_BG = "#0f172a"
+BG         = "#0d1117"
+SURFACE    = "#161b22"
+SURFACE2   = "#21262d"
+BORDER     = "#30363d"
+BORDER_SUB = "#21262d"
+ACCENT     = "#7c3aed"
+ACCENT_LT  = "#a78bfa"
+ACCENT_DIM = "#2e1065"
+ACCENT_MID = "#4c1d95"
+GREEN      = "#3fb950"
+RED        = "#f85149"
+ORANGE     = "#e3b341"
+TEXT       = "#e6edf3"
+TEXT2      = "#8b949e"
+TEXT3      = "#484f58"
+INPUT_BG   = "#0d1117"
 
 RESOLUTIONS   = ["original", "2160p", "1440p", "1080p", "720p", "480p", "360p"]
 CODECS_LABELS = ["H.264 (libx264)", "H.265 (libx265)"]
@@ -240,128 +227,210 @@ VIDEO_EXTS    = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".flv"
 
 
 # ──────────────────────────────────────────────
-#  Video Card widget
+#  Micro-widgets
+# ──────────────────────────────────────────────
+
+class HoverButton(tk.Label):
+    """Flat clickable label that swaps colour on hover."""
+    def __init__(self, parent, text, command, bg, fg,
+                 hover_bg, hover_fg=None, font=None,
+                 padx=16, pady=8, **kwargs):
+        font = font or ("Segoe UI", 9, "bold")
+        super().__init__(parent, text=text, bg=bg, fg=fg,
+                         font=font, padx=padx, pady=pady,
+                         cursor="hand2", **kwargs)
+        self._bg, self._fg = bg, fg
+        self._hbg = hover_bg
+        self._hfg = hover_fg or fg
+        self._cmd = command
+        self._disabled = False
+        self.bind("<Enter>",    self._enter)
+        self.bind("<Leave>",    self._leave)
+        self.bind("<Button-1>", self._click)
+
+    def _enter(self, e):
+        if not self._disabled:
+            self.config(bg=self._hbg, fg=self._hfg)
+
+    def _leave(self, e):
+        if not self._disabled:
+            self.config(bg=self._bg, fg=self._fg)
+
+    def _click(self, e):
+        if not self._disabled and self._cmd:
+            self._cmd()
+
+    def set_disabled(self, val: bool):
+        self._disabled = val
+        self.config(bg=SURFACE2 if val else self._bg,
+                    fg=TEXT3    if val else self._fg,
+                    cursor="arrow" if val else "hand2")
+
+
+class StyledEntry(tk.Entry):
+    def __init__(self, parent, var, width=9, font_size=9, **kwargs):
+        super().__init__(parent, textvariable=var, width=width,
+                         bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
+                         relief="flat", font=("Segoe UI", font_size),
+                         highlightthickness=1, highlightbackground=BORDER,
+                         selectbackground=ACCENT_MID, selectforeground=TEXT,
+                         **kwargs)
+        self.bind("<FocusIn>",  lambda e: self.config(highlightbackground=ACCENT_LT))
+        self.bind("<FocusOut>", lambda e: self.config(highlightbackground=BORDER))
+
+
+def sep(parent, padx=16, pady=(8, 8)):
+    tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=padx, pady=pady)
+
+
+def section_head(parent, text, padx=16, top=12):
+    tk.Label(parent, text=text.upper(), bg=SURFACE, fg=TEXT3,
+             font=("Segoe UI", 7, "bold")
+             ).pack(anchor="w", padx=padx, pady=(top, 4))
+
+
+# ──────────────────────────────────────────────
+#  Video Card
 # ──────────────────────────────────────────────
 
 class VideoCard(tk.Frame):
     def __init__(self, parent, video_path: str, remove_cb, scroll_update, **kwargs):
-        super().__init__(parent, bg=CARD, highlightthickness=1,
-                         highlightbackground=BORDER, **kwargs)
-        self.video_path = video_path
-        self.remove_cb = remove_cb
+        super().__init__(parent, bg=SURFACE,
+                         highlightthickness=1, highlightbackground=BORDER_SUB,
+                         **kwargs)
+        self.video_path    = video_path
+        self.remove_cb     = remove_cb
         self.scroll_update = scroll_update
-        self._photo = None
+        self._photo        = None
         self._build()
         self._load_info()
-
-    # ── helpers ──────────────────────────────────────────────────
-
-    def _lbl(self, parent, text, color=SUBTEXT, bold=False):
-        font = ("Segoe UI", 8, "bold") if bold else ("Segoe UI", 8)
-        return tk.Label(parent, text=text, bg=parent["bg"],
-                        fg=color, font=font)
-
-    def _entry(self, parent, var, w=7):
-        return tk.Entry(parent, textvariable=var, width=w,
-                        bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
-                        relief="flat", font=("Segoe UI", 8),
-                        highlightthickness=1, highlightbackground=BORDER)
-
-    # ── build ─────────────────────────────────────────────────────
+        self.bind("<Enter>", lambda e: self.config(highlightbackground=ACCENT_MID))
+        self.bind("<Leave>", lambda e: self.config(highlightbackground=BORDER_SUB))
 
     def _build(self):
         self.columnconfigure(1, weight=1)
 
-        # Thumbnail column
-        self.thumb = tk.Label(self, bg="#0a1020", width=16, height=5,
-                              text="🎬", fg=SUBTEXT, font=("Segoe UI", 16))
-        self.thumb.grid(row=0, column=0, rowspan=3, padx=(8, 10),
-                        pady=8, sticky="ns")
+        # Thumbnail
+        self.thumb = tk.Label(self, bg="#0a0e17", width=17, height=5,
+                              text="▶", fg=TEXT3, font=("Segoe UI", 18))
+        self.thumb.grid(row=0, column=0, rowspan=3,
+                        padx=(10, 12), pady=10, sticky="ns")
 
-        # Header: filename + × button
-        header = tk.Frame(self, bg=CARD)
-        header.grid(row=0, column=1, sticky="ew", pady=(8, 2), padx=(0, 8))
-        header.columnconfigure(0, weight=1)
-
+        # Header
+        hdr = tk.Frame(self, bg=SURFACE)
+        hdr.grid(row=0, column=1, sticky="ew", pady=(10, 1), padx=(0, 10))
+        hdr.columnconfigure(0, weight=1)
         name = Path(self.video_path).name
-        name_disp = name if len(name) <= 42 else name[:39] + "…"
-        tk.Label(header, text=name_disp, bg=CARD, fg=TEXT,
+        disp = name if len(name) <= 48 else name[:45] + "…"
+        tk.Label(hdr, text=disp, bg=SURFACE, fg=TEXT,
                  font=("Segoe UI", 9, "bold"), anchor="w"
                  ).grid(row=0, column=0, sticky="ew")
-        tk.Button(header, text="✕", bg=CARD, fg=RED, relief="flat", bd=0,
-                  font=("Segoe UI", 10, "bold"), cursor="hand2",
-                  activebackground=CARD, activeforeground=RED,
-                  command=lambda: self.remove_cb(self)
-                  ).grid(row=0, column=1)
+        self._x = tk.Label(hdr, text="✕", bg=SURFACE, fg=TEXT3,
+                            font=("Segoe UI", 10), cursor="hand2")
+        self._x.grid(row=0, column=1)
+        self._x.bind("<Enter>",    lambda e: self._x.config(fg=RED))
+        self._x.bind("<Leave>",    lambda e: self._x.config(fg=TEXT3))
+        self._x.bind("<Button-1>", lambda e: self.remove_cb(self))
 
-        # Status line
-        self.status_var = tk.StringVar(value="Loading info…")
+        # Status
+        self.status_var = tk.StringVar(value="Reading metadata…")
         self.status_lbl = tk.Label(self, textvariable=self.status_var,
-                                   bg=CARD, fg=SUBTEXT,
+                                   bg=SURFACE, fg=TEXT2,
                                    font=("Segoe UI", 8), anchor="w")
-        self.status_lbl.grid(row=1, column=1, sticky="ew", padx=(0, 8))
+        self.status_lbl.grid(row=1, column=1, sticky="ew", padx=(0, 10))
 
-        # Controls row
-        ctrl = tk.Frame(self, bg=CARD)
-        ctrl.grid(row=2, column=1, sticky="ew", pady=(4, 8), padx=(0, 8))
+        # Controls
+        ctrl = tk.Frame(self, bg=SURFACE)
+        ctrl.grid(row=2, column=1, sticky="ew", pady=(6, 10), padx=(0, 10))
 
-        self._lbl(ctrl, "Start (s):").pack(side="left")
+        def mini_field(label, var, width):
+            grp = tk.Frame(ctrl, bg=SURFACE)
+            tk.Label(grp, text=label, bg=SURFACE, fg=TEXT3,
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w")
+            StyledEntry(grp, var, width).pack()
+            return grp
+
         self.start_var = tk.StringVar(value="0")
-        self._entry(ctrl, self.start_var, 6).pack(side="left", padx=(3, 12))
+        self.end_var   = tk.StringVar(value="?")
+        mini_field("START (s)", self.start_var, 7).pack(side="left", padx=(0, 10))
+        mini_field("END (s)",   self.end_var,   8).pack(side="left", padx=(0, 14))
 
-        self._lbl(ctrl, "End (s):").pack(side="left")
-        self.end_var = tk.StringVar(value="?")
-        self._entry(ctrl, self.end_var, 8).pack(side="left", padx=(3, 12))
-
-        self._lbl(ctrl, "Mute:").pack(side="left", padx=(4, 2))
+        # Mute pill
+        mgrp = tk.Frame(ctrl, bg=SURFACE)
+        tk.Label(mgrp, text="MUTE", bg=SURFACE, fg=TEXT3,
+                 font=("Segoe UI", 7, "bold")).pack(anchor="w")
         self.mute_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(ctrl, variable=self.mute_var,
-                       bg=CARD, fg=TEXT, activebackground=CARD,
-                       selectcolor=ACCENT, relief="flat",
-                       cursor="hand2").pack(side="left")
+        self._mpill = tk.Label(mgrp, text="OFF", bg=SURFACE2, fg=TEXT3,
+                               font=("Segoe UI", 7, "bold"),
+                               padx=10, pady=4, cursor="hand2")
+        self._mpill.pack()
+        self._mpill.bind("<Button-1>", self._toggle_mute)
+        mgrp.pack(side="left")
 
-        # Progress bar (hidden until encoding)
-        self.prog = ttk.Progressbar(self, mode="determinate", length=10)
-        self.prog.grid(row=3, column=0, columnspan=2,
-                       sticky="ew", padx=8, pady=(0, 8))
-        self.prog.grid_remove()
+        # Thin progress bar at card bottom
+        self._pb_frame = tk.Frame(self, bg=INPUT_BG, height=3)
+        self._pb_frame.grid(row=3, column=0, columnspan=2,
+                            sticky="ew", padx=0, pady=0)
+        self._pb_frame.grid_propagate(False)
+        self._pb_canvas = tk.Canvas(self._pb_frame, bg=INPUT_BG,
+                                    height=3, highlightthickness=0)
+        self._pb_canvas.pack(fill="x", expand=True)
+        self._pb_frame.grid_remove()
 
-    # ── info loading ─────────────────────────────────────────────
+    def _toggle_mute(self, e=None):
+        self.mute_var.set(not self.mute_var.get())
+        if self.mute_var.get():
+            self._mpill.config(text="ON", bg=ACCENT_MID, fg=ACCENT_LT)
+        else:
+            self._mpill.config(text="OFF", bg=SURFACE2, fg=TEXT3)
 
     def _load_info(self):
         def worker():
             info = ffprobe_info(self.video_path)
-            dur = info["duration"]
+            dur  = info["duration"]
             w, h = info["width"], info["height"]
             dur_s = f"{dur:.2f}" if dur else "?"
-            res = f"{w}×{h}  " if w else ""
             self.end_var.set(dur_s)
-            self.status_var.set(f"{res}{dur_s}s")
+            parts = []
+            if w:
+                parts.append(f"{w}×{h}")
+            if dur:
+                s = int(dur)
+                hh, rem = divmod(s, 3600)
+                mm, ss = divmod(rem, 60)
+                parts.append(f"{hh}:{mm:02}:{ss:02}" if hh else f"{mm}:{ss:02}")
+            self.status_var.set("  ·  ".join(parts) if parts else "?")
             if PIL_AVAILABLE:
-                photo = extract_thumbnail(self.video_path)
+                photo = extract_thumbnail(self.video_path, (128, 72))
                 if photo:
                     self._photo = photo
                     self.thumb.config(image=photo, text="",
-                                      width=120, height=68)
+                                      width=128, height=72, bg="#000")
             self.scroll_update()
         threading.Thread(target=worker, daemon=True).start()
 
-    # ── public API ───────────────────────────────────────────────
-
-    def set_status(self, text, color=SUBTEXT):
+    def set_status(self, text, color=TEXT2):
         self.status_var.set(text)
         self.status_lbl.config(fg=color)
 
     def show_progress(self, show: bool):
         if show:
-            self.prog["value"] = 0
-            self.prog.grid()
+            self._pb_frame.grid()
+            self._draw_pb(0)
         else:
-            self.prog.grid_remove()
+            self._pb_frame.grid_remove()
 
     def set_progress(self, value: int):
-        """Update progress bar (0-100) — safe to call from any thread."""
-        self.prog["value"] = value
+        self._draw_pb(value)
+
+    def _draw_pb(self, pct):
+        self._pb_canvas.update_idletasks()
+        total = self._pb_canvas.winfo_width()
+        self._pb_canvas.delete("all")
+        fill = int(total * pct / 100)
+        if fill > 0:
+            self._pb_canvas.create_rectangle(
+                0, 0, fill, 3, fill=ACCENT_LT, outline="")
 
     @property
     def values(self):
@@ -378,96 +447,137 @@ class VideoCard(tk.Frame):
 
 
 # ──────────────────────────────────────────────
-#  Main application window
+#  Main application
 # ──────────────────────────────────────────────
 
 _TkBase = tkdnd.TkinterDnD.Tk if DND_AVAILABLE else tk.Tk
+
 
 class App(_TkBase):
     def __init__(self):
         super().__init__()
         self.title("Video Compressor")
         self.configure(bg=BG)
-        self.geometry("980x680")
-        self.minsize(800, 540)
+        self.geometry("1020x700")
+        self.minsize(820, 560)
 
         self._cards: list[VideoCard] = []
-        self._running = False
+        self._running   = False
         self._stop_flag = False
         self._log_q: queue.Queue = queue.Queue()
 
-        self._apply_style()
-        self._build_layout()
+        self._style_setup()
+        self._build()
         self._poll_log()
 
-    # ── style ────────────────────────────────────────────────────
-
-    def _apply_style(self):
+    def _style_setup(self):
         s = ttk.Style(self)
         s.theme_use("clam")
-        s.configure("TProgressbar",
-                     troughcolor=INPUT_BG, background=ACCENT,
-                     borderwidth=0)
-        s.configure("TCombobox",
+        s.configure("Dark.Vertical.TScrollbar",
+                     troughcolor=SURFACE, background=SURFACE2,
+                     arrowcolor=TEXT3, borderwidth=0, arrowsize=11)
+        s.map("Dark.Vertical.TScrollbar",
+              background=[("active", BORDER)])
+        s.configure("V.TCombobox",
                      fieldbackground=INPUT_BG, background=INPUT_BG,
-                     foreground=TEXT, selectbackground=ACCENT,
-                     borderwidth=0, relief="flat")
-        s.map("TCombobox",
+                     foreground=TEXT, selectbackground=ACCENT_MID,
+                     selectforeground=TEXT, arrowcolor=TEXT2,
+                     borderwidth=0, padding=(8, 6))
+        s.map("V.TCombobox",
               fieldbackground=[("readonly", INPUT_BG)],
               foreground=[("readonly", TEXT)],
-              selectbackground=[("readonly", ACCENT)])
+              selectbackground=[("readonly", ACCENT_MID)],
+              background=[("readonly", INPUT_BG)])
 
-    # ── layout ───────────────────────────────────────────────────
-
-    def _build_layout(self):
+    def _build(self):
         self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=0)
-        self.rowconfigure(0, weight=1)
+        self.columnconfigure(1, minsize=272, weight=0)
+        self.rowconfigure(1, weight=1)
+        self._build_topbar()
+        self._build_left()
+        self._build_right()
 
-        # ── Left panel ──────────────────────────────────────────
+    # ── top bar ──────────────────────────────────────────────────
+
+    def _build_topbar(self):
+        bar = tk.Frame(self, bg=SURFACE,
+                       highlightthickness=1, highlightbackground=BORDER)
+        bar.grid(row=0, column=0, columnspan=2,
+                 sticky="ew", padx=16, pady=(16, 10))
+        bar.columnconfigure(1, weight=1)
+
+        # Colour accent strip
+        tk.Frame(bar, bg=ACCENT, width=4).grid(row=0, column=0, sticky="ns")
+
+        title_wrap = tk.Frame(bar, bg=SURFACE)
+        title_wrap.grid(row=0, column=1, sticky="w", padx=14, pady=10)
+        tk.Label(title_wrap, text="Video Compressor", bg=SURFACE, fg=TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        tk.Label(title_wrap, text="Two-pass H.264 / H.265  ·  target file size",
+                 bg=SURFACE, fg=TEXT2, font=("Segoe UI", 8)).pack(anchor="w")
+
+        self._badge = tk.Label(bar, text="No files queued",
+                               bg=SURFACE, fg=TEXT3, font=("Segoe UI", 8))
+        self._badge.grid(row=0, column=2, padx=16)
+
+    # ── left / queue ─────────────────────────────────────────────
+
+    def _build_left(self):
         left = tk.Frame(self, bg=BG)
-        left.grid(row=0, column=0, sticky="nsew", padx=(16, 8), pady=16)
-        left.rowconfigure(2, weight=1)
+        left.grid(row=1, column=0, sticky="nsew",
+                  padx=(16, 8), pady=(0, 16))
+        left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
 
-        tk.Label(left, text="Queue", bg=BG, fg=TEXT,
-                 font=("Segoe UI", 14, "bold")
-                 ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        # Drop zone with dashed canvas border
+        self._dz = tk.Frame(left, bg=SURFACE,
+                             highlightthickness=2, highlightbackground=BORDER,
+                             cursor="hand2")
+        self._dz.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self._dz.columnconfigure(0, weight=1)
 
-        # Drop zone
-        dz = tk.Frame(left, bg=PANEL, highlightthickness=2,
-                      highlightbackground=ACCENT, cursor="hand2")
-        dz.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        dz.columnconfigure(0, weight=1)
-        self._dz_inner = tk.Label(
-            dz,
-            text="⬇   Drop video files here   or   click to browse",
-            bg=PANEL, fg=SUBTEXT,
-            font=("Segoe UI", 10), pady=20, cursor="hand2")
-        self._dz_inner.grid(row=0, column=0, sticky="ew")
-        dz.bind("<Button-1>", self._browse)
-        self._dz_inner.bind("<Button-1>", self._browse)
-        dz.bind("<Enter>", lambda e: dz.config(highlightbackground=TEXT))
-        dz.bind("<Leave>", lambda e: dz.config(highlightbackground=ACCENT))
-        self._drop_zone = dz
+        self._dz_cv = tk.Canvas(self._dz, bg=SURFACE, height=100,
+                                highlightthickness=0)
+        self._dz_cv.grid(row=0, column=0, sticky="ew")
+        self._dz_cv.bind("<Configure>", self._redraw_dz)
 
-        # Scrollable card area
+        self._dz_icon  = tk.Label(self._dz_cv, text="⬆", bg=SURFACE,
+                                   fg=TEXT3, font=("Segoe UI", 22))
+        self._dz_icon.place(relx=0.5, rely=0.25, anchor="center")
+
+        self._dz_line1 = tk.Label(self._dz_cv, text="Drop video files here",
+                                   bg=SURFACE, fg=TEXT2,
+                                   font=("Segoe UI", 10, "bold"))
+        self._dz_line1.place(relx=0.5, rely=0.58, anchor="center")
+
+        self._dz_line2 = tk.Label(self._dz_cv,
+                                   text="or click to browse  ·  MP4 MOV AVI MKV WebM and more",
+                                   bg=SURFACE, fg=TEXT3, font=("Segoe UI", 8))
+        self._dz_line2.place(relx=0.5, rely=0.80, anchor="center")
+
+        for w in (self._dz, self._dz_cv, self._dz_icon,
+                  self._dz_line1, self._dz_line2):
+            w.bind("<Button-1>", self._browse)
+            w.bind("<Enter>",    self._dz_on)
+            w.bind("<Leave>",    self._dz_off)
+
+        # Scrollable list
         wrap = tk.Frame(left, bg=BG)
-        wrap.grid(row=2, column=0, sticky="nsew")
+        wrap.grid(row=1, column=0, sticky="nsew")
         wrap.rowconfigure(0, weight=1)
         wrap.columnconfigure(0, weight=1)
 
         self._canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
         self._canvas.grid(row=0, column=0, sticky="nsew")
         vsb = ttk.Scrollbar(wrap, orient="vertical",
-                             command=self._canvas.yview)
+                             command=self._canvas.yview,
+                             style="Dark.Vertical.TScrollbar")
         vsb.grid(row=0, column=1, sticky="ns")
         self._canvas.configure(yscrollcommand=vsb.set)
 
         self._card_frame = tk.Frame(self._canvas, bg=BG)
         self._cf_id = self._canvas.create_window(
             (0, 0), window=self._card_frame, anchor="nw")
-
         self._card_frame.bind("<Configure>", self._sync_scroll)
         self._canvas.bind("<Configure>",
                           lambda e: self._canvas.itemconfig(
@@ -477,124 +587,161 @@ class App(_TkBase):
                    lambda e: self._canvas.yview_scroll(
                        -1 * (e.delta // 120), "units"))
 
-        # DnD wiring
+        self._empty = tk.Label(self._card_frame,
+                               text="Your queue is empty.\nAdd videos using the drop zone above.",
+                               bg=BG, fg=TEXT3,
+                               font=("Segoe UI", 9), justify="center")
+        self._empty.pack(pady=50)
+
         if DND_AVAILABLE:
-            for w in (self, dz, self._dz_inner):
+            for w in (self, self._dz, self._dz_cv,
+                      self._dz_icon, self._dz_line1, self._dz_line2):
                 w.drop_target_register(tkdnd.DND_FILES)
                 w.dnd_bind("<<Drop>>", self._on_drop)
 
-        # ── Thin divider ────────────────────────────────────────
-        tk.Frame(self, bg=BORDER, width=1).grid(
-            row=0, column=0, sticky="nse", pady=20)
+    def _redraw_dz(self, e=None):
+        c = self._dz_cv
+        c.update_idletasks()
+        w, h = c.winfo_width(), c.winfo_height()
+        c.delete("dash")
+        pad = 8
+        c.create_rectangle(pad, pad, w - pad, h - pad,
+                            dash=(6, 4), outline=TEXT3,
+                            fill="", tags="dash")
 
-        # ── Right panel ─────────────────────────────────────────
-        right = tk.Frame(self, bg=PANEL, width=256)
-        right.grid(row=0, column=1, sticky="nsew",
-                   padx=(0, 16), pady=16)
-        right.columnconfigure(0, weight=1)
-        right.grid_propagate(False)
-        self._build_settings(right)
+    def _dz_on(self, e=None):
+        self._dz.config(highlightbackground=ACCENT)
+        for w in (self._dz, self._dz_cv, self._dz_icon,
+                  self._dz_line1, self._dz_line2):
+            w.config(bg=ACCENT_DIM)
+        self._dz_icon.config(fg=ACCENT_LT)
+        self._dz_line1.config(fg=TEXT)
+
+    def _dz_off(self, e=None):
+        self._dz.config(highlightbackground=BORDER)
+        for w in (self._dz, self._dz_cv, self._dz_icon,
+                  self._dz_line1, self._dz_line2):
+            w.config(bg=SURFACE)
+        self._dz_icon.config(fg=TEXT3)
+        self._dz_line1.config(fg=TEXT2)
 
     def _sync_scroll(self, e=None):
-        self._canvas.configure(
-            scrollregion=self._canvas.bbox("all"))
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
 
-    # ── settings panel ───────────────────────────────────────────
+    # ── right / settings ─────────────────────────────────────────
 
-    def _build_settings(self, p):
-        P = 14  # horizontal padding
+    def _build_right(self):
+        p = tk.Frame(self, bg=SURFACE,
+                     highlightthickness=1, highlightbackground=BORDER)
+        p.grid(row=1, column=1, sticky="nsew",
+               padx=(0, 16), pady=(0, 16))
+        p.columnconfigure(0, weight=1)
+        p.grid_propagate(False)
+        P = 16
 
-        def shead(text, top=14):
-            tk.Label(p, text=text, bg=PANEL, fg=ACCENT,
-                     font=("Segoe UI", 8, "bold")
-                     ).pack(anchor="w", padx=P, pady=(top, 3))
-
-        def combo(var, values):
-            cb = ttk.Combobox(p, textvariable=var, values=values,
-                              state="readonly", font=("Segoe UI", 9))
-            cb.pack(fill="x", padx=P, pady=(0, 2))
-            return cb
-
-        tk.Label(p, text="Settings", bg=PANEL, fg=TEXT,
-                 font=("Segoe UI", 14, "bold")
-                 ).pack(anchor="w", padx=P, pady=(16, 12))
+        tk.Label(p, text="Settings", bg=SURFACE, fg=TEXT,
+                 font=("Segoe UI", 12, "bold")
+                 ).pack(anchor="w", padx=P, pady=(16, 4))
 
         # Target size
-        shead("Target Size", top=0)
-        row = tk.Frame(p, bg=PANEL)
-        row.pack(fill="x", padx=P)
+        section_head(p, "Target size", P, top=8)
+        size_row = tk.Frame(p, bg=SURFACE)
+        size_row.pack(fill="x", padx=P)
+        size_row.columnconfigure(0, weight=1)
         self.size_var = tk.StringVar(value="50")
-        tk.Entry(row, textvariable=self.size_var, width=8,
-                 bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
-                 relief="flat", font=("Segoe UI", 10),
-                 highlightthickness=1, highlightbackground=BORDER
-                 ).pack(side="left")
-        tk.Label(row, text=" MB", bg=PANEL, fg=SUBTEXT,
-                 font=("Segoe UI", 9)).pack(side="left")
+        size_e = StyledEntry(size_row, self.size_var, width=8,
+                             font_size=20, justify="right")
+        size_e.grid(row=0, column=0, sticky="ew", ipady=4)
+        tk.Label(size_row, text=" MB", bg=SURFACE, fg=TEXT2,
+                 font=("Segoe UI", 14, "bold")).grid(row=0, column=1)
+
+        # Quick-pick chips
+        qp = tk.Frame(p, bg=SURFACE)
+        qp.pack(fill="x", padx=P, pady=(6, 0))
+        for mb in (8, 16, 25, 50, 100, 200):
+            chip = tk.Label(qp, text=f"{mb}", bg=SURFACE2, fg=TEXT2,
+                            font=("Segoe UI", 7, "bold"),
+                            padx=7, pady=4, cursor="hand2")
+            chip.pack(side="left", padx=(0, 4))
+            chip.bind("<Button-1>", lambda e, v=mb: self.size_var.set(str(v)))
+            chip.bind("<Enter>", lambda e, w=chip: w.config(bg=ACCENT_MID, fg=ACCENT_LT))
+            chip.bind("<Leave>", lambda e, w=chip: w.config(bg=SURFACE2, fg=TEXT2))
+        tk.Label(qp, text="MB", bg=SURFACE, fg=TEXT3,
+                 font=("Segoe UI", 7)).pack(side="left", padx=(2, 0))
+
+        sep(p, padx=P, pady=(12, 0))
 
         # Resolution
-        shead("Resolution")
+        section_head(p, "Resolution", P, top=10)
         self.res_var = tk.StringVar(value="original")
-        combo(self.res_var, RESOLUTIONS)
+        ttk.Combobox(p, textvariable=self.res_var, values=RESOLUTIONS,
+                     state="readonly", style="V.TCombobox",
+                     font=("Segoe UI", 9)).pack(fill="x", padx=P)
 
         # Codec
-        shead("Codec")
+        section_head(p, "Codec", P, top=10)
         self.codec_var = tk.StringVar(value="H.264 (libx264)")
-        combo(self.codec_var, CODECS_LABELS)
+        ttk.Combobox(p, textvariable=self.codec_var, values=CODECS_LABELS,
+                     state="readonly", style="V.TCombobox",
+                     font=("Segoe UI", 9)).pack(fill="x", padx=P)
 
         # Preset
-        shead("Preset")
+        section_head(p, "Encoding preset", P, top=10)
         self.preset_var = tk.StringVar(value="medium")
-        combo(self.preset_var, PRESETS)
+        ttk.Combobox(p, textvariable=self.preset_var, values=PRESETS,
+                     state="readonly", style="V.TCombobox",
+                     font=("Segoe UI", 9)).pack(fill="x", padx=P)
+        tk.Label(p, text="Slower preset → better quality, smaller file",
+                 bg=SURFACE, fg=TEXT3,
+                 font=("Segoe UI", 7)).pack(anchor="w", padx=P, pady=(3, 0))
 
-        # Spacer
-        tk.Frame(p, bg=PANEL, height=20).pack()
+        sep(p, padx=P, pady=(12, 8))
 
-        # Start button
-        self.start_btn = tk.Button(
-            p, text="▶  Start Encoding",
-            bg=GREEN, fg="#000",
-            activebackground="#16a34a", activeforeground="#000",
+        # Buttons
+        self._start_btn = HoverButton(
+            p, text="▶   Start Encoding",
+            command=self._start,
+            bg=ACCENT, fg="#fff",
+            hover_bg="#6d28d9",
             font=("Segoe UI", 10, "bold"),
-            relief="flat", bd=0, cursor="hand2", pady=11,
-            command=self._start)
-        self.start_btn.pack(fill="x", padx=P, pady=(0, 6))
+            pady=12, padx=0)
+        self._start_btn.pack(fill="x", padx=P, pady=(0, 6))
 
-        # Stop button
-        self.stop_btn = tk.Button(
-            p, text="■  Stop",
-            bg=ORANGE, fg="#000",
-            activebackground="#ea580c", activeforeground="#000",
-            font=("Segoe UI", 10, "bold"),
-            relief="flat", bd=0, cursor="hand2", pady=11,
-            state="disabled", command=self._stop)
-        self.stop_btn.pack(fill="x", padx=P)
+        self._stop_btn = HoverButton(
+            p, text="■   Stop after current",
+            command=self._stop,
+            bg=SURFACE2, fg=ORANGE,
+            hover_bg="#2d2115",
+            font=("Segoe UI", 9),
+            pady=9, padx=0)
+        self._stop_btn.pack(fill="x", padx=P)
+        self._stop_btn.set_disabled(True)
 
-        # Log area
-        shead("Log")
+        sep(p, padx=P, pady=(12, 0))
+
+        section_head(p, "Activity log", P, top=8)
         self.log_box = tk.Text(
-            p, bg=INPUT_BG, fg=SUBTEXT,
-            font=("Consolas", 7), relief="flat",
-            wrap="word", state="disabled",
-            highlightthickness=1, highlightbackground=BORDER)
-        self.log_box.pack(fill="both", expand=True,
-                          padx=P, pady=(2, 16))
+            p, bg=INPUT_BG, fg=TEXT3,
+            font=("Consolas", 7),
+            relief="flat", wrap="word", state="disabled",
+            highlightthickness=1, highlightbackground=BORDER,
+            padx=6, pady=6)
+        self.log_box.pack(fill="both", expand=True, padx=P, pady=(0, 16))
 
     # ── file handling ────────────────────────────────────────────
 
     def _browse(self, event=None):
         files = filedialog.askopenfilenames(
             title="Select videos",
-            filetypes=[
-                ("Video files",
-                 "*.mp4 *.mov *.avi *.mkv *.webm *.m4v *.wmv *.flv"),
-                ("All files", "*.*")])
+            filetypes=[("Video files",
+                        "*.mp4 *.mov *.avi *.mkv *.webm *.m4v *.wmv *.flv"),
+                       ("All files", "*.*")])
         for f in files:
             self._add_video(f)
 
     def _on_drop(self, event):
-        for match in re.findall(r'\{([^}]+)\}|(\S+)', event.data):
-            path = match[0] or match[1]
+        for m in re.findall(r'\{([^}]+)\}|(\S+)', event.data):
+            path = m[0] or m[1]
             if path and Path(path).is_file() \
                     and Path(path).suffix.lower() in VIDEO_EXTS:
                 self._add_video(path)
@@ -603,53 +750,64 @@ class App(_TkBase):
         path = str(Path(path).resolve())
         if any(c.video_path == path for c in self._cards):
             return
-        card = VideoCard(
-            self._card_frame, path,
-            remove_cb=self._remove_card,
-            scroll_update=self._sync_scroll)
+        if self._empty.winfo_manager():
+            self._empty.pack_forget()
+        card = VideoCard(self._card_frame, path,
+                         remove_cb=self._remove_card,
+                         scroll_update=self._sync_scroll)
         card.pack(fill="x", pady=(0, 6), padx=4)
         self._cards.append(card)
         self._sync_scroll()
+        self._update_badge()
 
     def _remove_card(self, card: VideoCard):
         if self._running:
             return
         self._cards.remove(card)
         card.destroy()
+        if not self._cards:
+            self._empty.pack(pady=50)
         self._sync_scroll()
+        self._update_badge()
+
+    def _update_badge(self):
+        n = len(self._cards)
+        if n == 0:
+            self._badge.config(text="No files queued", fg=TEXT3)
+        else:
+            self._badge.config(
+                text=f"{n} file{'s' if n > 1 else ''} queued", fg=TEXT2)
 
     # ── encoding ─────────────────────────────────────────────────
 
     def _start(self):
         if not self._cards:
-            messagebox.showinfo(
-                "No videos", "Add videos to the queue first.")
+            messagebox.showinfo("No videos", "Add videos to the queue first.")
             return
         try:
             target_mb = float(self.size_var.get())
             assert target_mb > 0
         except (ValueError, AssertionError):
-            messagebox.showerror(
-                "Invalid", "Enter a valid positive number for target size.")
+            messagebox.showerror("Invalid",
+                                 "Enter a valid positive number for target size.")
             return
 
-        self._running = True
+        self._running   = True
         self._stop_flag = False
-        self.start_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
+        self._start_btn.set_disabled(True)
+        self._stop_btn.set_disabled(False)
 
-        cards   = list(self._cards)
-        codec   = CODECS_MAP[self.codec_var.get()]
-        res     = self.res_var.get()
-        preset  = self.preset_var.get()
+        cards  = list(self._cards)
+        codec  = CODECS_MAP[self.codec_var.get()]
+        res    = self.res_var.get()
+        preset = self.preset_var.get()
 
         def worker():
             for card in cards:
                 if self._stop_flag:
-                    self.after(0, card.set_status, "⏭ skipped", SUBTEXT)
+                    self.after(0, card.set_status, "⏭  skipped", TEXT3)
                     continue
-
-                self.after(0, card.set_status, "⏳ encoding…", ACCENT)
+                self.after(0, card.set_status, "⏳  encoding…", ACCENT_LT)
                 self.after(0, card.show_progress, True)
 
                 v   = card.values
@@ -665,30 +823,29 @@ class App(_TkBase):
                         start_s=v["start"], end_s=v["end"],
                         cfg=cfg,
                         log_fn=lambda msg: self._log_q.put(msg),
-                        progress_cb=lambda pct: self.after(0, card.set_progress, pct),
+                        progress_cb=lambda pct: self.after(
+                            0, card.set_progress, pct),
                     )
                     size_mb = os.path.getsize(out) / (1024 * 1024)
                     self.after(0, card.set_status,
-                               f"✓ done — {size_mb:.1f} MB", GREEN)
+                               f"✓  done  ·  {size_mb:.1f} MB", GREEN)
                 except Exception as ex:
-                    self.after(0, card.set_status, f"✗ {ex}", RED)
+                    self.after(0, card.set_status, f"✗  {ex}", RED)
                     self._log_q.put(f"ERROR: {ex}")
                 finally:
                     self.after(0, card.show_progress, False)
 
             self._running = False
             self._log_q.put("── All jobs finished ──")
-            self.after(0, self.start_btn.config, {"state": "normal"})
-            self.after(0, self.stop_btn.config,  {"state": "disabled"})
+            self.after(0, self._start_btn.set_disabled, False)
+            self.after(0, self._stop_btn.set_disabled, True)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _stop(self):
         self._stop_flag = True
-        self.stop_btn.config(state="disabled")
-        self._log_q.put("Stop requested — will finish current job first…")
-
-    # ── log polling ──────────────────────────────────────────────
+        self._stop_btn.set_disabled(True)
+        self._log_q.put("Stop requested — finishing current job…")
 
     def _poll_log(self):
         try:
@@ -709,14 +866,10 @@ class App(_TkBase):
 
 def main():
     root = App()
-
     if not DND_AVAILABLE:
-        root._log_q.put(
-            "Tip: pip install tkinterdnd2  →  enables drag & drop")
+        root._log_q.put("Tip: pip install tkinterdnd2  →  drag & drop support")
     if not PIL_AVAILABLE:
-        root._log_q.put(
-            "Tip: pip install Pillow       →  enables video thumbnails")
-
+        root._log_q.put("Tip: pip install Pillow       →  video thumbnails")
     root.mainloop()
 
 

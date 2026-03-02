@@ -1,106 +1,169 @@
 import json
-import math
-import os
 import platform
 import subprocess
+import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
+
+from flask import Flask, jsonify, render_template, request
+from werkzeug.utils import secure_filename
+
+app = Flask(__name__)
+BASE_DIR = Path(__file__).parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+OUTPUT_DIR = BASE_DIR / "outputs"
+UPLOAD_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 
 @dataclass
 class EncodeConfig:
     target_mb: float
-    codec: str = "libx264"          # "libx265" also works (two-pass), AV1 varies by encoder
+    codec: str = "libx264"
     preset: str = "medium"
-    container: str = "mp4"
     audio_codec: str = "aac"
-    audio_kbps: int = 96            # if keeping audio
-    mute: bool = False              # if True, drop audio entirely for best size predictability
-    safety_margin: float = 0.98     # reserve ~2% for overhead / rounding
+    audio_kbps: int = 96
+    mute: bool = False
+    safety_margin: float = 0.98
+    scale_filter: str | None = None
 
-def run(cmd: list[str]) -> None:
-    print(" ".join(cmd))
-    subprocess.run(cmd, check=True)
+
+state_lock = threading.Lock()
+state = {
+    "running": False,
+    "progress": 0.0,
+    "message": "Idle",
+    "total": 0,
+    "completed": 0,
+}
+stop_event = threading.Event()
+current_process: subprocess.Popen | None = None
+
 
 def ffprobe_duration_seconds(input_path: str) -> float:
-    # Probe the *container* duration; good enough for most cases.
-    # For tricky files, you can probe stream duration or use ffprobe -show_entries format=duration.
     cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "json",
-        input_path
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        input_path,
     ]
     out = subprocess.check_output(cmd, text=True)
     data = json.loads(out)
     return float(data["format"]["duration"])
 
+
 def null_device() -> str:
     return "NUL" if platform.system().lower().startswith("win") else "/dev/null"
+
 
 def compute_video_bitrate_kbps(target_mb: float, duration_s: float, audio_kbps: int, mute: bool, safety_margin: float) -> int:
     target_bytes = target_mb * 1024 * 1024
     target_bits = target_bytes * 8 * safety_margin
     total_bps = target_bits / max(duration_s, 0.001)
-
     audio_bps = 0 if mute else audio_kbps * 1000
-    video_bps = max(total_bps - audio_bps, 100_000)  # clamp to something nonzero
-    video_kbps = int(video_bps / 1000)
-    return max(video_kbps, 100)  # final clamp
+    video_bps = max(total_bps - audio_bps, 100_000)
+    return max(int(video_bps / 1000), 100)
+
+
+def run_ffmpeg_with_progress(
+    cmd: list[str],
+    duration_s: float,
+    pass_offset: float,
+    pass_weight: float,
+    overall_callback: Callable[[float], None],
+) -> None:
+    global current_process
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    current_process = process
+
+    try:
+        while True:
+            if stop_event.is_set() and process.poll() is None:
+                process.terminate()
+                raise RuntimeError("Compression stopped by user")
+
+            line = process.stdout.readline() if process.stdout else ""
+            if not line and process.poll() is not None:
+                break
+
+            if line.startswith("out_time_ms="):
+                out_time_ms = float(line.split("=", 1)[1].strip() or 0)
+                progress = min((out_time_ms / 1_000_000) / max(duration_s, 0.001), 1.0)
+                overall_callback(pass_offset + progress * pass_weight)
+
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, cmd)
+    finally:
+        current_process = None
+
 
 def two_pass_encode(
     input_path: str,
     output_path: str,
     start_s: float | None,
     end_s: float | None,
-    cfg: EncodeConfig
+    cfg: EncodeConfig,
+    progress_callback: Callable[[float], None],
 ) -> None:
-    input_path = str(input_path)
-    output_path = str(output_path)
-
-    # Use trims to estimate duration better than full duration
     full_dur = ffprobe_duration_seconds(input_path)
-    if start_s is None:
-        start_s = 0.0
-    if end_s is None or end_s > full_dur:
-        end_s = full_dur
+    start_s = 0.0 if start_s is None else max(0.0, start_s)
+    end_s = full_dur if end_s is None else min(end_s, full_dur)
     seg_dur = max(end_s - start_s, 0.001)
 
     v_kbps = compute_video_bitrate_kbps(cfg.target_mb, seg_dur, cfg.audio_kbps, cfg.mute, cfg.safety_margin)
     logbase = str(Path(output_path).with_suffix("")) + "_2pass"
-
-    # Common input trim args
-    trim_args = []
-    # For accurate cuts, place -ss AFTER -i (decode-accurate).
-    # For faster but less accurate, put -ss before -i.
-    # Here we choose accurate.
-    # We'll use -ss and -to (end timestamp), not -t.
     trim_args = ["-ss", f"{start_s}", "-to", f"{end_s}"]
+    scale_args = ["-vf", cfg.scale_filter] if cfg.scale_filter else []
 
-    # PASS 1: analysis only (no audio), write stats to passlog
     pass1 = [
-        "ffmpeg", "-y",
-        "-i", input_path,
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
         *trim_args,
-        "-c:v", cfg.codec,
-        "-b:v", f"{v_kbps}k",
-        "-preset", cfg.preset,
-        "-pass", "1",
-        "-passlogfile", logbase,
+        *scale_args,
+        "-c:v",
+        cfg.codec,
+        "-b:v",
+        f"{v_kbps}k",
+        "-preset",
+        cfg.preset,
+        "-pass",
+        "1",
+        "-passlogfile",
+        logbase,
         "-an",
-        "-f", "mp4",
-        null_device()
+        "-f",
+        "mp4",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        null_device(),
     ]
 
-    # PASS 2: real output, include or drop audio
     pass2 = [
-        "ffmpeg", "-y",
-        "-i", input_path,
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
         *trim_args,
-        "-c:v", cfg.codec,
-        "-b:v", f"{v_kbps}k",
-        "-preset", cfg.preset,
-        "-pass", "2",
-        "-passlogfile", logbase,
+        *scale_args,
+        "-c:v",
+        cfg.codec,
+        "-b:v",
+        f"{v_kbps}k",
+        "-preset",
+        cfg.preset,
+        "-pass",
+        "2",
+        "-passlogfile",
+        logbase,
     ]
 
     if cfg.mute:
@@ -108,36 +171,134 @@ def two_pass_encode(
     else:
         pass2 += ["-c:a", cfg.audio_codec, "-b:a", f"{cfg.audio_kbps}k"]
 
-    # Nice UX for MP4
-    pass2 += ["-movflags", "+faststart", output_path]
+    pass2 += ["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", output_path]
 
     try:
-        run(pass1)
-        run(pass2)
+        run_ffmpeg_with_progress(pass1, seg_dur, 0.0, 0.5, progress_callback)
+        run_ffmpeg_with_progress(pass2, seg_dur, 0.5, 0.5, progress_callback)
     finally:
-        # Clean up 2-pass logs (FFmpeg may create several files depending on encoder)
         for suffix in ["-0.log", "-0.log.mbtree", ".log", ".log.mbtree"]:
             p = Path(logbase + suffix)
             if p.exists():
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+                p.unlink(missing_ok=True)
+
+
+def update_state(**kwargs):
+    with state_lock:
+        state.update(kwargs)
+
+
+def resolution_to_filter(resolution: str) -> str | None:
+    mapping = {
+        "original": None,
+        "1080p": "scale=-2:1080",
+        "720p": "scale=-2:720",
+        "480p": "scale=-2:480",
+    }
+    return mapping.get(resolution, None)
+
+
+def worker(jobs: list[dict], target_mb: float, codec: str, resolution: str):
+    update_state(running=True, progress=0.0, message="Starting...", total=len(jobs), completed=0)
+    stop_event.clear()
+
+    for index, job in enumerate(jobs):
+        if stop_event.is_set():
+            update_state(running=False, message="Stopped", progress=state["progress"])
+            return
+
+        input_path = job["input_path"]
+        output_name = f"{Path(job['filename']).stem}_compressed_{uuid.uuid4().hex[:8]}.mp4"
+        output_path = str(OUTPUT_DIR / output_name)
+        update_state(message=f"Compressing {job['filename']} ({index + 1}/{len(jobs)})")
+
+        cfg = EncodeConfig(
+            target_mb=target_mb,
+            codec=codec,
+            preset="medium",
+            mute=job["mute"],
+            scale_filter=resolution_to_filter(resolution),
+        )
+
+        def item_progress(value: float):
+            overall = (index + value) / max(len(jobs), 1)
+            update_state(progress=round(overall * 100, 2))
+
+        try:
+            two_pass_encode(
+                input_path=input_path,
+                output_path=output_path,
+                start_s=job["start"],
+                end_s=job["end"],
+                cfg=cfg,
+                progress_callback=item_progress,
+            )
+        except Exception as exc:
+            update_state(running=False, message=f"Error: {exc}")
+            return
+
+        update_state(completed=index + 1)
+
+    update_state(running=False, progress=100.0, message="All videos compressed")
+
+
+@app.get("/")
+def index():
+    return render_template("index.html")
+
+
+@app.post("/api/compress")
+def start_compression():
+    with state_lock:
+        if state["running"]:
+            return jsonify({"error": "Compression already running"}), 409
+
+    metadata = json.loads(request.form.get("metadata", "[]"))
+    files = request.files.getlist("videos")
+    if not files:
+        return jsonify({"error": "No videos uploaded"}), 400
+
+    target_mb = float(request.form.get("target_mb", "50"))
+    codec = request.form.get("codec", "libx264")
+    resolution = request.form.get("resolution", "original")
+
+    jobs = []
+    for idx, uploaded in enumerate(files):
+        safe_name = secure_filename(uploaded.filename or f"video_{idx}.mp4")
+        stored = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_name}"
+        uploaded.save(stored)
+
+        info = metadata[idx] if idx < len(metadata) else {}
+        jobs.append(
+            {
+                "filename": safe_name,
+                "input_path": str(stored),
+                "start": float(info.get("start", 0)),
+                "end": info.get("end"),
+                "mute": bool(info.get("mute", False)),
+            }
+        )
+
+    thread = threading.Thread(target=worker, args=(jobs, target_mb, codec, resolution), daemon=True)
+    thread.start()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/stop")
+def stop_compression():
+    stop_event.set()
+    global current_process
+    if current_process and current_process.poll() is None:
+        current_process.terminate()
+    update_state(running=False, message="Stopping...")
+    return jsonify({"ok": True})
+
+
+@app.get("/api/status")
+def get_status():
+    with state_lock:
+        return jsonify(state)
+
 
 if __name__ == "__main__":
-    cfg = EncodeConfig(
-        target_mb=50,
-        codec="libx264",
-        preset="slow",     # slower = better efficiency (smaller for same quality)
-        audio_kbps=96,
-        mute=False
-    )
-
-    two_pass_encode(
-        input_path="input.mp4",
-        output_path="output_50mb.mp4",
-        start_s=5,
-        end_s=65,
-        cfg=cfg
-    )
-    print("Done.")
+    app.run(debug=True)

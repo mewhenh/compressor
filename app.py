@@ -9,6 +9,8 @@ from pathlib import Path
 from tkinter import ttk, messagebox, filedialog
 import queue
 import re
+import time
+import tempfile
 
 try:
     from PIL import Image, ImageTk
@@ -46,6 +48,56 @@ def run_cmd(cmd: list, log_fn=None) -> None:
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def run_cmd_progress(cmd: list, duration_s: float, progress_cb,
+                     pct_start=0, pct_end=100, log_fn=None) -> None:
+    """Run ffmpeg, writing -progress to a temp file we poll every 100ms."""
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    # Swap "pipe:1" placeholder for the real temp path
+    cmd = [tmp_path if a == "__PROGRESS__" else a for a in cmd]
+
+    if log_fn:
+        log_fn("$ " + " ".join(cmd))
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    pct_range = pct_end - pct_start
+    last_pct = pct_start
+
+    while proc.poll() is None:
+        try:
+            with open(tmp_path, "r") as f:
+                content = f.read()
+            for line in reversed(content.splitlines()):
+                if line.startswith("out_time_ms="):
+                    ms_str = line.split("=", 1)[1].strip()
+                    if ms_str and ms_str != "N/A":
+                        ms = int(ms_str)
+                        ratio = min(1.0, ms / 1_000_000 / max(duration_s, 0.001))
+                        pct = pct_start + int(ratio * pct_range)
+                        if pct > last_pct:
+                            last_pct = pct
+                            progress_cb(pct)
+                    break
+        except Exception:
+            pass
+        time.sleep(0.1)
+
+    progress_cb(pct_end)
+
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+
+
 def ffprobe_info(input_path: str) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
@@ -80,7 +132,8 @@ def compute_video_bitrate_kbps(target_mb, duration_s, audio_kbps, mute, safety_m
     return max(int(video_bps / 1000), 100)
 
 
-def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig, log_fn=None):
+def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig,
+                    log_fn=None, progress_cb=None):
     input_path = str(input_path)
     output_path = str(output_path)
 
@@ -93,7 +146,7 @@ def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig, 
 
     v_kbps = compute_video_bitrate_kbps(
         cfg.target_mb, seg_dur, cfg.audio_kbps, cfg.mute, cfg.safety_margin)
-    logbase = str(Path(output_path).with_suffix("")) + "_2pass"
+    logbase = str(Path(__file__).parent / (Path(output_path).stem + "_2pass"))
     trim_args = ["-ss", f"{start_s}", "-to", f"{end_s}"]
 
     vf_args = []
@@ -101,11 +154,15 @@ def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig, 
         h = cfg.resolution.replace("p", "")
         vf_args = ["-vf", f"scale=-2:{h}"]
 
+    cb = progress_cb or (lambda v: None)
+
     pass1 = [
         "ffmpeg", "-y", "-i", input_path, *trim_args,
         "-c:v", cfg.codec, "-b:v", f"{v_kbps}k",
         "-preset", cfg.preset, "-pass", "1", "-passlogfile", logbase,
-        *vf_args, "-an", "-f", "mp4", null_device()
+        *vf_args, "-an",
+        "-progress", "__PROGRESS__",
+        "-f", "mp4", null_device()
     ]
     pass2 = [
         "ffmpeg", "-y", "-i", input_path, *trim_args,
@@ -117,11 +174,14 @@ def two_pass_encode(input_path, output_path, start_s, end_s, cfg: EncodeConfig, 
         pass2 += ["-an"]
     else:
         pass2 += ["-c:a", cfg.audio_codec, "-b:a", f"{cfg.audio_kbps}k"]
-    pass2 += ["-movflags", "+faststart", output_path]
+    pass2 += ["-movflags", "+faststart", "-progress", "__PROGRESS__", output_path]
 
     try:
-        run_cmd(pass1, log_fn)
-        run_cmd(pass2, log_fn)
+        cb(0)
+        run_cmd_progress(pass1, seg_dur, cb,
+                         pct_start=0,  pct_end=50,  log_fn=log_fn)
+        run_cmd_progress(pass2, seg_dur, cb,
+                         pct_start=50, pct_end=100, log_fn=log_fn)
     finally:
         for suffix in ["-0.log", "-0.log.mbtree", ".log", ".log.mbtree"]:
             p = Path(logbase + suffix)
@@ -261,7 +321,7 @@ class VideoCard(tk.Frame):
                        cursor="hand2").pack(side="left")
 
         # Progress bar (hidden until encoding)
-        self.prog = ttk.Progressbar(self, mode="indeterminate", length=10)
+        self.prog = ttk.Progressbar(self, mode="determinate", length=10)
         self.prog.grid(row=3, column=0, columnspan=2,
                        sticky="ew", padx=8, pady=(0, 8))
         self.prog.grid_remove()
@@ -294,11 +354,14 @@ class VideoCard(tk.Frame):
 
     def show_progress(self, show: bool):
         if show:
+            self.prog["value"] = 0
             self.prog.grid()
-            self.prog.start(10)
         else:
-            self.prog.stop()
             self.prog.grid_remove()
+
+    def set_progress(self, value: int):
+        """Update progress bar (0-100) — safe to call from any thread."""
+        self.prog["value"] = value
 
     @property
     def values(self):
@@ -601,7 +664,9 @@ class App(_TkBase):
                         input_path=src, output_path=out,
                         start_s=v["start"], end_s=v["end"],
                         cfg=cfg,
-                        log_fn=lambda msg: self._log_q.put(msg))
+                        log_fn=lambda msg: self._log_q.put(msg),
+                        progress_cb=lambda pct: self.after(0, card.set_progress, pct),
+                    )
                     size_mb = os.path.getsize(out) / (1024 * 1024)
                     self.after(0, card.set_status,
                                f"✓ done — {size_mb:.1f} MB", GREEN)

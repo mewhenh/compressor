@@ -1,0 +1,17 @@
+:root { font-family: Arial, sans-serif; color: #f3f5fa; background: #121722; }
+body { margin: 0; background: #121722; }
+.layout { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; padding: 20px; }
+.left-panel, .right-panel { background: #1a2232; border-radius: 12px; padding: 16px; }
+.dropzone { border: 2px dashed #5e81ff; padding: 24px; text-align: center; border-radius: 10px; cursor: pointer; margin-bottom: 14px; }
+.queue { display: flex; flex-direction: column; gap: 10px; max-height: 75vh; overflow: auto; }
+.video-item { display: grid; grid-template-columns: 180px 1fr; gap: 12px; background: #202b3e; padding: 10px; border-radius: 8px; }
+.video-item video { width: 100%; height: 110px; object-fit: cover; border-radius: 6px; }
+.meta { display: grid; gap: 6px; }
+label { display: grid; gap: 4px; margin-bottom: 8px; }
+input, select, button { padding: 8px; border-radius: 8px; border: 1px solid #3a4a6a; background: #0e1524; color: white; }
+.button-row { display: flex; gap: 10px; margin-top: 16px; }
+button { cursor: pointer; }
+button.danger { background: #7f1d1d; }
+.progress-wrap { width: 100%; height: 14px; background: #0e1524; border-radius: 999px; overflow: hidden; margin-top: 10px; }
+.progress-bar { width: 0%; height: 100%; background: linear-gradient(90deg, #5e81ff, #61dafb); transition: width 0.2s ease; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }

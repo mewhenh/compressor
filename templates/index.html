@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Video Compressor</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="layout">
+    <section class="left-panel">
+      <h2>Queue</h2>
+      <div id="dropzone" class="dropzone">Drag & drop videos here or click to select</div>
+      <input id="picker" type="file" accept="video/*" multiple hidden />
+      <div id="queue" class="queue"></div>
+    </section>
+
+    <section class="right-panel">
+      <h2>Options</h2>
+      <label>Goal size (MB)
+        <input id="targetMb" type="number" min="1" value="50" />
+      </label>
+      <label>Resolution
+        <select id="resolution">
+          <option value="original" selected>Original</option>
+          <option value="1080p">1080p</option>
+          <option value="720p">720p</option>
+          <option value="480p">480p</option>
+        </select>
+      </label>
+      <label>Video encoder
+        <select id="codec">
+          <option value="libx264" selected>H.264 (libx264)</option>
+          <option value="libx265">H.265 (libx265)</option>
+        </select>
+      </label>
+
+      <div class="progress-wrap">
+        <div id="progressBar" class="progress-bar"></div>
+      </div>
+      <p id="statusText">Idle</p>
+
+      <div class="button-row">
+        <button id="startBtn">Start</button>
+        <button id="stopBtn" class="danger">Stop</button>
+      </div>
+    </section>
+  </main>
+
+  <template id="itemTemplate">
+    <article class="video-item">
+      <video muted></video>
+      <div class="meta">
+        <strong class="name"></strong>
+        <label><input type="checkbox" class="mute" /> Mute</label>
+        <label>Start (sec) <input type="number" class="start" min="0" step="0.1" value="0" /></label>
+        <label>End (sec) <input type="number" class="end" min="0" step="0.1" /></label>
+      </div>
+    </article>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

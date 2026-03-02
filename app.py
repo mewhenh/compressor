@@ -769,7 +769,7 @@ class App(_TkBase):
 
         # Preset
         section_head(p, "Encoding preset", P, top=10)
-        self.preset_var = tk.StringVar(value="p4")  # sensible default for nvenc
+        self.preset_var = tk.StringVar(value="p7")  # sensible default for nvenc
         self.preset_cb = ttk.Combobox(
             p, textvariable=self.preset_var, values=NVENC_PRESETS,
             state="readonly", style="V.TCombobox",

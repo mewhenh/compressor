@@ -9,3 +9,8 @@
 ## Install (Python)
 ```bash
 pip install -r requirements.txt
+```
+## Build
+``` bash
+python -m PyInstaller app.py
+```

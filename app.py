@@ -15,6 +15,9 @@ app = Flask(__name__)
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = BASE_DIR / "outputs"
+UPLOAD_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 @dataclass
@@ -223,6 +226,8 @@ def worker(jobs: list[dict], target_mb: float, codec: str, resolution: str):
 
         input_path = job["input_path"]
         output_path = build_output_path(input_path)
+        output_name = f"{Path(job['filename']).stem}_compressed_{uuid.uuid4().hex[:8]}.mp4"
+        output_path = str(OUTPUT_DIR / output_name)
         update_state(message=f"Compressing {job['filename']} ({index + 1}/{len(jobs)})")
 
         cfg = EncodeConfig(
@@ -292,6 +297,14 @@ def start_compression():
             {
                 "filename": safe_name,
                 "input_path": input_path,
+        stored = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_name}"
+        uploaded.save(stored)
+
+        info = metadata[idx] if idx < len(metadata) else {}
+        jobs.append(
+            {
+                "filename": safe_name,
+                "input_path": str(stored),
                 "start": float(info.get("start", 0)),
                 "end": info.get("end"),
                 "mute": bool(info.get("mute", False)),
@@ -322,3 +335,4 @@ def get_status():
 if __name__ == "__main__":
     threading.Timer(0.6, lambda: webbrowser.open("http://127.0.0.1:5000")).start()
     app.run(debug=True, use_reloader=False)
+    app.run(debug=True)

@@ -33,10 +33,10 @@ except ImportError:
 class EncodeConfig:
     target_mb: float
     codec: str = "libx264"
-    preset: str = "medium"
+    preset: str = "slow"
     container: str = "mp4"
     audio_codec: str = "aac"
-    audio_kbps: int = 96
+    audio_kbps: int = 128
     mute: bool = False
     safety_margin: float = 0.94
     resolution: str = "original"
@@ -219,10 +219,44 @@ TEXT3      = "#484f58"
 INPUT_BG   = "#0d1117"
 
 RESOLUTIONS   = ["original", "2160p", "1440p", "1080p", "720p", "480p", "360p"]
-CODECS_LABELS = ["H.264 (libx264)", "H.265 (libx265)"]
-CODECS_MAP    = {"H.264 (libx264)": "libx264", "H.265 (libx265)": "libx265"}
-PRESETS       = ["ultrafast", "superfast", "veryfast", "faster", "fast",
+
+CODECS_LABELS = ["H.264 (nvenc)", 
+                 "H.265 (nvenc)",
+                 "H.264 (CPU)",
+                 "H.265 (CPU)"]
+
+CODECS_MAP    = {"H.264 (nvenc)": "h264_nvenc", 
+                 "H.265 (nvenc)": "hevc_nvenc",
+                 "H.264 (CPU)": "libx264",
+                 "H.265 (CPU)": "libx265"}
+
+CPU_PRESETS   = ["ultrafast", "superfast", "veryfast", "faster", "fast",
                  "medium", "slow", "slower", "veryslow"]
+
+NVENC_PRESETS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"]
+
+# Optional: keep the "feel" when switching CPU <-> NVENC
+CPU_TO_NVENC = {
+    "ultrafast": "p1",
+    "superfast": "p2",
+    "veryfast":  "p3",
+    "faster":    "p3",
+    "fast":      "p4",
+    "medium":    "p4",
+    "slow":      "p5",
+    "slower":    "p6",
+    "veryslow":  "p7",
+}
+NVENC_TO_CPU = {
+    "p1": "ultrafast",
+    "p2": "superfast",
+    "p3": "veryfast",
+    "p4": "medium",
+    "p5": "slow",
+    "p6": "slower",
+    "p7": "veryslow",
+}
+
 VIDEO_EXTS    = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".flv"}
 
 
@@ -725,20 +759,33 @@ class App(_TkBase):
 
         # Codec
         section_head(p, "Codec", P, top=10)
-        self.codec_var = tk.StringVar(value="H.264 (libx264)")
-        ttk.Combobox(p, textvariable=self.codec_var, values=CODECS_LABELS,
-                     state="readonly", style="V.TCombobox",
-                     font=("Segoe UI", 9)).pack(fill="x", padx=P)
+        self.codec_var = tk.StringVar(value="H.264 (nvenc)")
+        self.codec_cb = ttk.Combobox(
+            p, textvariable=self.codec_var, values=CODECS_LABELS,
+            state="readonly", style="V.TCombobox",
+            font=("Segoe UI", 9)
+        )
+        self.codec_cb.pack(fill="x", padx=P)
 
         # Preset
         section_head(p, "Encoding preset", P, top=10)
-        self.preset_var = tk.StringVar(value="medium")
-        ttk.Combobox(p, textvariable=self.preset_var, values=PRESETS,
-                     state="readonly", style="V.TCombobox",
-                     font=("Segoe UI", 9)).pack(fill="x", padx=P)
+        self.preset_var = tk.StringVar(value="p4")  # sensible default for nvenc
+        self.preset_cb = ttk.Combobox(
+            p, textvariable=self.preset_var, values=NVENC_PRESETS,
+            state="readonly", style="V.TCombobox",
+            font=("Segoe UI", 9)
+        )
+        self.preset_cb.pack(fill="x", padx=P)
+
         tk.Label(p, text="Slower preset → better quality, smaller file",
                  bg=SURFACE, fg=TEXT3,
                  font=("Segoe UI", 7)).pack(anchor="w", padx=P, pady=(3, 0))
+
+        # Bind codec changes -> update preset list
+        self.codec_cb.bind("<<ComboboxSelected>>", self._on_codec_change)
+
+        # Set correct preset options on startup too
+        self._on_codec_change()
 
         sep(p, padx=P, pady=(12, 8))
 
@@ -903,6 +950,39 @@ class App(_TkBase):
         except queue.Empty:
             pass
         self.after(120, self._poll_log)
+
+    def _is_nvenc_selected(self) -> bool:
+        try:
+            codec = CODECS_MAP[self.codec_var.get()]
+        except Exception:
+            return False
+        return codec in ("h264_nvenc", "hevc_nvenc")
+
+    def _on_codec_change(self, event=None):
+        # Choose preset list based on codec
+        is_nvenc = self._is_nvenc_selected()
+        new_values = NVENC_PRESETS if is_nvenc else CPU_PRESETS
+
+        # Remember current value and try to "translate" it
+        current = self.preset_var.get().strip()
+
+        if is_nvenc:
+            translated = CPU_TO_NVENC.get(current, None)
+            fallback = "p4"
+        else:
+            translated = NVENC_TO_CPU.get(current, None)
+            fallback = "medium"
+
+        # Apply new dropdown values
+        self.preset_cb.configure(values=new_values)
+
+        # Pick the best preset to keep UX smooth
+        if translated in new_values:
+            self.preset_var.set(translated)
+        elif current in new_values:
+            self.preset_var.set(current)
+        else:
+            self.preset_var.set(fallback)
 
 
 # ──────────────────────────────────────────────

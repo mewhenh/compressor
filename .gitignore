@@ -1,3 +1,6 @@
 ffmpeg/
 outputs/
 uploads/
+build/
+dist/
+app.spec

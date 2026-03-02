@@ -473,21 +473,66 @@ class App(_TkBase):
     def _style_setup(self):
         s = ttk.Style(self)
         s.theme_use("clam")
-        s.configure("Dark.Vertical.TScrollbar",
-                     troughcolor=SURFACE, background=SURFACE2,
-                     arrowcolor=TEXT3, borderwidth=0, arrowsize=11)
-        s.map("Dark.Vertical.TScrollbar",
-              background=[("active", BORDER)])
-        s.configure("V.TCombobox",
-                     fieldbackground=INPUT_BG, background=INPUT_BG,
-                     foreground=TEXT, selectbackground=ACCENT_MID,
-                     selectforeground=TEXT, arrowcolor=TEXT2,
-                     borderwidth=0, padding=(8, 6))
-        s.map("V.TCombobox",
-              fieldbackground=[("readonly", INPUT_BG)],
-              foreground=[("readonly", TEXT)],
-              selectbackground=[("readonly", ACCENT_MID)],
-              background=[("readonly", INPUT_BG)])
+
+        # -------------------------------
+        # Scrollbar: remove bright edges
+        # -------------------------------
+        s.configure(
+            "Dark.Vertical.TScrollbar",
+            troughcolor=SURFACE,
+            background=SURFACE2,
+            bordercolor=BORDER,   # <- key: kill bright border
+            lightcolor=BORDER,    # <- kill 3D highlight
+            darkcolor=BORDER,     # <- kill 3D shadow
+            arrowcolor=TEXT3,
+            relief="flat",
+            borderwidth=0,
+            arrowsize=11,
+        )
+        s.map(
+            "Dark.Vertical.TScrollbar",
+            background=[("active", BORDER)],
+            arrowcolor=[("active", TEXT2)]
+        )
+
+        # ---------------------------------------
+        # Combobox field itself (the entry area)
+        # ---------------------------------------
+        s.configure(
+            "V.TCombobox",
+            fieldbackground=INPUT_BG,
+            bordercolor=BORDER,   # <- key: kill bright border
+            lightcolor=BORDER,    # <- kill 3D highlight
+            darkcolor=BORDER,     # <- kill 3D shadow
+            background=INPUT_BG,
+            foreground=TEXT,
+            selectbackground=ACCENT_MID,
+            selectforeground=TEXT,
+            arrowcolor=TEXT2,
+            borderwidth=0,
+            relief="flat",
+            padding=(8, 6),
+        )
+
+        s.map(
+            "V.TCombobox",
+            fieldbackground=[("readonly", INPUT_BG), ("focus", INPUT_BG), ("active", INPUT_BG)],
+            background=[("readonly", INPUT_BG), ("focus", INPUT_BG), ("active", INPUT_BG)],
+            foreground=[("readonly", TEXT)],
+            selectbackground=[("readonly", ACCENT_MID)],
+        )
+
+        # ----------------------------------------------------------
+        # Dropdown list (popdown Listbox): THIS fixes the white menu
+        # ----------------------------------------------------------
+        # These option database keys are what Tk uses for the popdown list.
+        self.option_add("*TCombobox*Listbox.background", INPUT_BG)
+        self.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT_MID)
+        self.option_add("*TCombobox*Listbox.selectForeground", TEXT)
+        self.option_add("*TCombobox*Listbox.borderWidth", 0)
+        self.option_add("*TCombobox*Listbox.highlightThickness", 0)
+        self.option_add("*TCombobox*Listbox.relief", "flat")
 
     def _build(self):
         self.columnconfigure(0, weight=1)

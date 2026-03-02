@@ -12,5 +12,5 @@ pip install -r requirements.txt
 ```
 ## Build
 ``` bash
-python -m PyInstaller app.py
+python -m PyInstaller --windowed app.py
 ```
